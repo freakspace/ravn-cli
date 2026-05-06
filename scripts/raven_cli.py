@@ -800,6 +800,10 @@ class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Required when an HTTPS public origin (e.g. dev.ravn.gg) POSTs to a
+        # private IP like 127.0.0.1. Without this, Chrome (and Safari in
+        # stricter modes) block the request with "Load failed".
+        self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def do_OPTIONS(self) -> None:  # CORS preflight
         self.send_response(204)
