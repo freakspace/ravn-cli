@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""raven_cli — Drive a Raven trading platform instance from the command line.
+"""raven_cli — Drive a Ravn trading platform instance from the command line.
 
 Designed for AI-agent use: every command prints a compact human-readable summary
 by default, or raw JSON with --json. Auth is via Bearer API key (`rvn_*`) read
-from --api-key or the RAVEN_API_KEY env var.
+from --api-key or the RAVN_API_KEY env var.
 
 Stdlib only. Python 3.10+.
 """
@@ -11,9 +11,11 @@ Stdlib only. Python 3.10+.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -25,15 +27,32 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-DEFAULT_API_URL = "http://localhost:8000"
+DEFAULT_API_URL = "https://api.ravn.gg"
 DEFAULT_TIMEOUT = 30.0
 LOGIN_LISTENER_TIMEOUT_SECONDS = 300
+
+# Crockford-ish alphabet kept in sync with api/routers/cli_auth.py to derive a
+# short OOB confirmation code from the PKCE challenge. Both sides compute the
+# same string so the user can verify their browser belongs to this CLI session.
+_USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_USER_CODE_LENGTH = 6
+
+
+def _derive_user_code(code_challenge: str) -> str:
+    digest = hashlib.sha256(code_challenge.encode("utf-8")).hexdigest().upper()
+    raw = bytes.fromhex(digest)
+    out: list[str] = []
+    for byte in raw:
+        out.append(_USER_CODE_ALPHABET[byte % len(_USER_CODE_ALPHABET)])
+        if len(out) >= _USER_CODE_LENGTH:
+            break
+    return "".join(out[:_USER_CODE_LENGTH])
 
 
 def config_path() -> Path:
     """Return the path to the persistent config file (XDG-aware)."""
     base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "raven" / "config.json"
+    return Path(base) / "ravn" / "config.json"
 
 
 def load_config() -> dict[str, Any]:
@@ -61,32 +80,29 @@ def resolve_api_key(cli_value: str | None) -> str | None:
     """Resolve API key with precedence: --api-key > env var > config file."""
     if cli_value:
         return cli_value
-    env = os.getenv("RAVEN_API_KEY")
+    env = os.getenv("RAVN_API_KEY")
     if env:
         return env
     cfg = load_config()
     return cfg.get("api_key")
 
 
-def resolve_api_url(cli_value: str) -> str:
-    """Resolve API URL with precedence: --api-url > env var > config file > default.
-
-    The CLI passes a default value (DEFAULT_API_URL or env) in cli_value, so we
-    only fall back to the config file when the user didn't override it.
-    """
-    if cli_value and cli_value != DEFAULT_API_URL:
+def resolve_api_url(cli_value: str | None) -> str:
+    """Resolve API URL with precedence: --api-url > $RAVN_API_URL > config file > default."""
+    if cli_value:
         return cli_value
-    if os.getenv("RAVEN_API_URL"):
-        return cli_value
+    env = os.getenv("RAVN_API_URL")
+    if env:
+        return env
     cfg = load_config()
-    return cfg.get("api_url") or cli_value
+    return cfg.get("api_url") or DEFAULT_API_URL
 
 
 class ApiError(RuntimeError):
-    """Raised for Raven API failures."""
+    """Raised for Ravn API failures."""
 
 
-class RavenClient:
+class RavnClient:
     def __init__(self, api_url: str, api_key: str | None):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
@@ -103,7 +119,7 @@ class RavenClient:
     ) -> Any:
         if require_auth and not self.api_key:
             raise ApiError(
-                "Missing API key. Set RAVEN_API_KEY or pass --api-key."
+                "Missing API key. Set RAVN_API_KEY or pass --api-key."
             )
 
         if params:
@@ -203,27 +219,32 @@ def fmt_session_row(s: dict[str, Any]) -> str:
 # -------- command handlers --------
 
 
-def cmd_whoami(client: RavenClient, args: argparse.Namespace) -> int:
-    data = client.get("/api/auth/session")
+def cmd_whoami(client: RavnClient, args: argparse.Namespace) -> int:
+    # `/api/agent/whoami` accepts both interactive JWT and `rvn_*` API keys,
+    # which is what the CLI uses. The legacy `/api/auth/session` route is
+    # human-only and 403s on API keys.
+    data = client.get("/api/agent/whoami")
     user = (data or {}).get("user") or {}
     summary = (
         f"authenticated as {user.get('email') or user.get('username') or '?'}\n"
-        f"  id            : {user.get('id')}\n"
-        f"  plan_tier     : {user.get('plan_tier')}\n"
-        f"  is_admin      : {user.get('is_admin')}\n"
-        f"  features      : {', '.join(user.get('enabled_features') or []) or '(none)'}"
+        f"  id                  : {user.get('id')}\n"
+        f"  account_type        : {user.get('account_type')}\n"
+        f"  is_service_account  : {user.get('is_service_account')}\n"
+        f"  owner_user_id       : {user.get('owner_user_id')}\n"
+        f"  is_admin            : {user.get('is_admin')}\n"
+        f"  scopes              : {', '.join(user.get('scopes') or []) or '(none)'}"
     )
     emit(args, summary, data)
     return 0
 
 
-def cmd_docs_guide(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_docs_guide(client: RavnClient, args: argparse.Namespace) -> int:
     text = client.get("/api/agent/guide", require_auth=False, accept="text/markdown")
     print(text if isinstance(text, str) else json.dumps(text, indent=2))
     return 0
 
 
-def cmd_docs_prompt(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_docs_prompt(client: RavnClient, args: argparse.Namespace) -> int:
     text = client.get(
         "/api/agent/system-prompt", require_auth=False, accept="text/markdown"
     )
@@ -231,7 +252,7 @@ def cmd_docs_prompt(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_docs_signals(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_docs_signals(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get("/api/strategies/signals/available", require_auth=False)
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -252,7 +273,7 @@ def cmd_docs_signals(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_list(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_list(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get("/api/strategies")
     items = data if isinstance(data, list) else []
     summary = "\n".join(fmt_strategy_row(s) for s in items) or "(no strategies)"
@@ -261,7 +282,7 @@ def cmd_strategies_list(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_get(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_get(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/strategies/{args.id}")
     s = data or {}
     summary = (
@@ -277,7 +298,7 @@ def cmd_strategies_get(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_create(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_create(client: RavnClient, args: argparse.Namespace) -> int:
     payload = load_json_arg(args.json_file)
     if args.name:
         payload["name"] = args.name
@@ -297,7 +318,7 @@ def cmd_strategies_create(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_update(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_update(client: RavnClient, args: argparse.Namespace) -> int:
     payload = load_json_arg(args.json_file)
     if "definition" not in payload:
         raise SystemExit("Update JSON must include 'definition'.")
@@ -311,7 +332,7 @@ def cmd_strategies_update(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_rename(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_rename(client: RavnClient, args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {}
     if args.name is not None:
         payload["name"] = args.name
@@ -326,14 +347,14 @@ def cmd_strategies_rename(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_strategies_delete(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_delete(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.delete(f"/api/strategies/{args.id}")
     summary = f"deleted strategy {args.id}: {data}"
     emit(args, summary, data)
     return 0
 
 
-def cmd_strategies_validate(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_strategies_validate(client: RavnClient, args: argparse.Namespace) -> int:
     payload = load_json_arg(args.json_file)
     request_body = {"definition": payload.get("definition", payload)}
     data = client.post(
@@ -355,7 +376,7 @@ def cmd_strategies_validate(client: RavenClient, args: argparse.Namespace) -> in
     return 0 if valid else 2
 
 
-def cmd_bots_list(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_list(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get("/api/bots")
     items = (data or {}).get("bots") if isinstance(data, dict) else (data or [])
     if not isinstance(items, list):
@@ -366,7 +387,7 @@ def cmd_bots_list(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_get(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_get(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/bots/{args.id}")
     b = data or {}
     summary = (
@@ -385,7 +406,7 @@ def cmd_bots_get(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_deploy(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_deploy(client: RavnClient, args: argparse.Namespace) -> int:
     if args.mode == "live" and not args.allow_live:
         raise SystemExit(
             "Refusing live deployment. Re-run with --allow-live ONLY after the user "
@@ -424,28 +445,28 @@ def cmd_bots_deploy(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_start(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_start(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.post(f"/api/bots/{args.id}/start")
     b = (data or {}).get("bot") or {}
     emit(args, f"started bot {args.id}: status={b.get('status')}", data)
     return 0
 
 
-def cmd_bots_stop(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_stop(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.post(f"/api/bots/{args.id}/stop")
     b = (data or {}).get("bot") or {}
     emit(args, f"stopped bot {args.id}: status={b.get('status')}", data)
     return 0
 
 
-def cmd_bots_redeploy(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_redeploy(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.post(f"/api/bots/{args.id}/redeploy")
     b = (data or {}).get("bot") or {}
     emit(args, f"redeployed bot {args.id}: status={b.get('status')}", data)
     return 0
 
 
-def cmd_bots_delete(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_delete(client: RavnClient, args: argparse.Namespace) -> int:
     if not args.confirm:
         raise SystemExit(
             "Refusing to delete bot without --confirm. This is irreversible "
@@ -456,14 +477,14 @@ def cmd_bots_delete(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_rename(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_rename(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.patch(f"/api/bots/{args.id}", {"name": args.name})
     b = data or {}
     emit(args, f"renamed bot {b.get('public_id') or b.get('id')}: {b.get('name')}", data)
     return 0
 
 
-def cmd_bots_logs(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_logs(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/bots/{args.id}/logs", params={"tail": args.tail})
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -474,7 +495,7 @@ def cmd_bots_logs(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_events(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_events(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(
         f"/api/bots/{args.id}/monitor/events",
         params={"hours": args.hours, "limit": args.limit},
@@ -492,7 +513,7 @@ def cmd_bots_events(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_bootstrap(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_bootstrap(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(
         f"/api/bots/{args.id}/monitor/bootstrap",
         params={"hours": args.hours, "load_cold_data": "true"},
@@ -520,7 +541,7 @@ def cmd_bots_bootstrap(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bots_sessions(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_bots_sessions(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/bots/{args.id}/sessions")
     items = data if isinstance(data, list) else []
     summary = "\n".join(fmt_session_row(s) for s in items) or "(no sessions)"
@@ -529,7 +550,7 @@ def cmd_bots_sessions(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_list(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_list(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(
         "/api/sessions",
         params={
@@ -548,7 +569,7 @@ def cmd_sessions_list(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_get(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_get(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/sessions/{args.id}")
     s = data or {}
     summary_dict = s.get("summary") or {}
@@ -570,13 +591,13 @@ def cmd_sessions_get(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_stop(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_stop(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.post(f"/api/sessions/{args.id}/stop")
     emit(args, f"stopped session {args.id}: {data}", data)
     return 0
 
 
-def cmd_sessions_delete(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_delete(client: RavnClient, args: argparse.Namespace) -> int:
     if not args.confirm:
         raise SystemExit("Refusing to delete session without --confirm.")
     data = client.delete(f"/api/sessions/{args.id}")
@@ -584,7 +605,7 @@ def cmd_sessions_delete(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_trades(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_trades(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(
         f"/api/sessions/{args.id}/trades",
         params={"page": args.page, "page_size": args.page_size},
@@ -605,7 +626,7 @@ def cmd_sessions_trades(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_orders(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_orders(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(
         f"/api/sessions/{args.id}/orders",
         params={"page": args.page, "page_size": args.page_size, "status": args.status},
@@ -624,7 +645,7 @@ def cmd_sessions_orders(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_equity(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_equity(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/sessions/{args.id}/equity")
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True, default=str))
@@ -643,7 +664,7 @@ def cmd_sessions_equity(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sessions_logs(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_sessions_logs(client: RavnClient, args: argparse.Namespace) -> int:
     text = client.get(
         f"/api/sessions/{args.id}/logs",
         params={"tail": args.tail},
@@ -653,7 +674,7 @@ def cmd_sessions_logs(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_simulate(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_simulate(client: RavnClient, args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"strategy_id": args.strategy}
     if args.initial_balance is not None:
         payload["initial_balance"] = args.initial_balance
@@ -673,7 +694,7 @@ def cmd_simulate(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_backtest(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_backtest(client: RavnClient, args: argparse.Namespace) -> int:
     if bool(args.recording) == bool(args.source_session):
         raise SystemExit(
             "Provide exactly one of --recording <id> or --source-session <id>."
@@ -706,7 +727,7 @@ def cmd_backtest(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_recordings_list(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_recordings_list(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get("/api/simulations/recordings")
     items = data if isinstance(data, list) else []
     if args.json:
@@ -725,7 +746,7 @@ def cmd_recordings_list(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_recordings_start(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_recordings_start(client: RavnClient, args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"market_ids": args.markets.split(",")}
     if args.duration_sec is not None:
         payload["duration_seconds"] = args.duration_sec
@@ -739,13 +760,13 @@ def cmd_recordings_start(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_recordings_stop(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_recordings_stop(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.post(f"/api/simulations/recordings/{args.id}/stop")
     emit(args, f"stopped recording {args.id}: {data}", data)
     return 0
 
 
-def cmd_recordings_delete(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_recordings_delete(client: RavnClient, args: argparse.Namespace) -> int:
     if not args.confirm:
         raise SystemExit("Refusing to delete recording without --confirm.")
     data = client.delete(f"/api/simulations/recordings/{args.id}")
@@ -791,7 +812,7 @@ class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(
             b"<!doctype html><meta charset='utf-8'>"
-            b"<title>Raven CLI</title>"
+            b"<title>Ravn CLI</title>"
             b"<body style='font-family:system-ui;padding:2em;text-align:center'>"
             b"<h1>You're signed in</h1>"
             b"<p>Return to your terminal. You can close this tab.</p></body>"
@@ -800,13 +821,21 @@ class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
             type(self).delivered_event.set()
 
 
-def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
     if not args.api_url:
         raise SystemExit("API URL not configured.")
 
     as_service_account = bool(getattr(args, "as_service_account", False))
     sa_name = getattr(args, "service_account_name", None)
     account_mode = "service_account" if as_service_account else "personal_key"
+
+    # PKCE: the verifier is held by this CLI process only. The server
+    # receives only the SHA-256 hash. The same hash is later echoed by the
+    # browser to the loopback listener, which lets us reject any payload
+    # that didn't come from the legitimate flow we started.
+    code_verifier = secrets.token_urlsafe(32)
+    code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
+    expected_user_code = _derive_user_code(code_challenge)
 
     server = http.server.HTTPServer(("127.0.0.1", 0), _LoginCallbackHandler)
     port = server.server_address[1]
@@ -819,11 +848,12 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     init_payload: dict[str, Any] = {
         "callback_url": callback_url,
         "account_mode": account_mode,
+        "code_challenge": code_challenge,
     }
     if account_mode == "service_account" and sa_name:
         init_payload["service_account_name"] = sa_name
 
-    init_client = RavenClient(args.api_url, api_key=None)
+    init_client = RavnClient(args.api_url, api_key=None)
     try:
         init_response = init_client.request(
             "POST",
@@ -836,18 +866,38 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
         raise SystemExit(f"Could not start login flow: {exc}") from exc
 
     consent_url = (init_response or {}).get("consent_url")
+    server_user_code = (init_response or {}).get("user_code")
     if not consent_url:
         server.server_close()
         raise SystemExit(f"Unexpected /init response: {init_response!r}")
+    if server_user_code and server_user_code != expected_user_code:
+        # If the server returns a different code than we computed locally,
+        # we cannot trust the OOB confirmation — abort rather than mislead
+        # the user.
+        server.server_close()
+        raise SystemExit(
+            "Server returned a user_code that does not match the local PKCE "
+            "challenge. Refusing to continue."
+        )
 
     if account_mode == "service_account":
         print(
             "Provisioning a new child service account on approve "
             f"(name={sa_name or 'raven-cli'})."
         )
+    print()
+    print(f"  Confirmation code: {expected_user_code}")
+    print()
+    print(
+        "  Verify this code matches what your browser shows on the consent "
+        "page. If it does not match, click Cancel — someone may be trying "
+        "to trick you into approving their CLI session."
+    )
+    print()
     print(f"Opening browser to: {consent_url}")
     print("(If your browser doesn't open, paste the URL above into one manually.)")
     print(f"Listening on {callback_url} for the API key…")
+    del code_verifier  # only the challenge is needed beyond this point
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -872,8 +922,21 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     user = payload.get("user") or {}
     delivered_mode = payload.get("account_mode") or account_mode
     service_account = payload.get("service_account") or None
+    delivered_challenge = payload.get("code_challenge")
     if not isinstance(api_key, str) or not api_key.startswith("rvn_"):
         raise SystemExit(f"Did not receive a valid API key: {payload!r}")
+    if not isinstance(delivered_challenge, str) or not secrets.compare_digest(
+        delivered_challenge, code_challenge
+    ):
+        # A racing local process could POST `{api_key: "rvn_attacker"}` to the
+        # listener before the legitimate consent page does. Without the PKCE
+        # echo the CLI cannot tell them apart; with it, any payload that
+        # doesn't carry our local challenge is rejected.
+        raise SystemExit(
+            "Refusing payload: missing or mismatched PKCE challenge. The "
+            "credential delivered to the local listener was not from the "
+            "consent flow this CLI started."
+        )
 
     cfg = load_config()
     cfg.update(
@@ -906,7 +969,7 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_logout(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_logout(client: RavnClient, args: argparse.Namespace) -> int:
     path = config_path()
     if not path.is_file():
         print("Already logged out (no config file).")
@@ -919,7 +982,7 @@ def cmd_logout(client: RavenClient, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_self_test(client: RavenClient, args: argparse.Namespace) -> int:
+def cmd_self_test(client: RavnClient, args: argparse.Namespace) -> int:
     """Verify the parser wires every command correctly without hitting the network."""
     parser = build_parser()
     samples = [
@@ -975,17 +1038,20 @@ def cmd_self_test(client: RavenClient, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="raven_cli",
-        description="Drive a Raven trading platform instance via the REST API.",
+        description="Drive a Ravn trading platform instance via the REST API.",
     )
     parser.add_argument(
         "--api-url",
-        default=os.getenv("RAVEN_API_URL", DEFAULT_API_URL),
-        help=f"Raven API base URL (default: $RAVEN_API_URL or {DEFAULT_API_URL}).",
+        default=None,
+        help=(
+            "Ravn API base URL. Resolution order: --api-url > $RAVN_API_URL "
+            f"> ~/.config/ravn/config.json > {DEFAULT_API_URL}."
+        ),
     )
     parser.add_argument(
         "--api-key",
-        default=os.getenv("RAVEN_API_KEY"),
-        help="Bearer API key (default: $RAVEN_API_KEY).",
+        default=os.getenv("RAVN_API_KEY"),
+        help="Bearer API key (default: $RAVN_API_KEY).",
     )
     parser.add_argument(
         "--json",
@@ -998,7 +1064,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("whoami", help="Show authenticated user.").set_defaults(func=cmd_whoami)
     login_p = sub.add_parser(
         "login",
-        help="Browser-based sign-in. Stores API key in ~/.config/raven/config.json.",
+        help="Browser-based sign-in. Stores API key in ~/.config/ravn/config.json.",
     )
     login_p.add_argument(
         "--as-service-account",
@@ -1194,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.api_url = resolve_api_url(args.api_url)
     args.api_key = resolve_api_key(args.api_key)
-    client = RavenClient(args.api_url, args.api_key)
+    client = RavnClient(args.api_url, args.api_key)
     return args.func(client, args)
 
 

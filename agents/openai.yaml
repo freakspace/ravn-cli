@@ -1,4 +1,4 @@
 interface:
-  display_name: "Raven"
-  short_description: "Manage a Raven trading platform account from chat."
-  default_prompt: "Use $raven to draft, deploy, and monitor trading strategies on the user's Raven instance."
+  display_name: "Ravn"
+  short_description: "Manage a Ravn trading platform account from chat."
+  default_prompt: "Use $ravn to draft, deploy, and monitor trading strategies on the user's Ravn instance."

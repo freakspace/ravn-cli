@@ -28,7 +28,7 @@ class ConfigPathTests(unittest.TestCase):
             os.environ["XDG_CONFIG_HOME"] = tmp
             try:
                 self.assertEqual(
-                    raven_cli.config_path(), Path(tmp) / "raven" / "config.json"
+                    raven_cli.config_path(), Path(tmp) / "ravn" / "config.json"
                 )
             finally:
                 del os.environ["XDG_CONFIG_HOME"]
@@ -36,7 +36,7 @@ class ConfigPathTests(unittest.TestCase):
     def test_config_path_default_is_home_dotconfig(self):
         os.environ.pop("XDG_CONFIG_HOME", None)
         self.assertEqual(
-            raven_cli.config_path(), Path.home() / ".config" / "raven" / "config.json"
+            raven_cli.config_path(), Path.home() / ".config" / "ravn" / "config.json"
         )
 
 
@@ -76,8 +76,8 @@ class AuthResolutionTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
         os.environ["XDG_CONFIG_HOME"] = self._tmp
-        os.environ.pop("RAVEN_API_KEY", None)
-        os.environ.pop("RAVEN_API_URL", None)
+        os.environ.pop("RAVN_API_KEY", None)
+        os.environ.pop("RAVN_API_URL", None)
 
     def tearDown(self):
         import shutil
@@ -86,12 +86,12 @@ class AuthResolutionTests(unittest.TestCase):
         os.environ.pop("XDG_CONFIG_HOME", None)
 
     def test_cli_flag_wins_over_env_and_config(self):
-        os.environ["RAVEN_API_KEY"] = "rvn_env"
+        os.environ["RAVN_API_KEY"] = "rvn_env"
         raven_cli.save_config({"api_key": "rvn_config"})
         self.assertEqual(raven_cli.resolve_api_key("rvn_flag"), "rvn_flag")
 
     def test_env_var_wins_over_config(self):
-        os.environ["RAVEN_API_KEY"] = "rvn_env"
+        os.environ["RAVN_API_KEY"] = "rvn_env"
         raven_cli.save_config({"api_key": "rvn_config"})
         self.assertEqual(raven_cli.resolve_api_key(None), "rvn_env")
 
@@ -102,11 +102,9 @@ class AuthResolutionTests(unittest.TestCase):
     def test_returns_none_when_nothing_configured(self):
         self.assertIsNone(raven_cli.resolve_api_key(None))
 
-    def test_url_falls_through_to_config_when_default_passed(self):
+    def test_url_falls_through_to_config_when_no_flag(self):
         raven_cli.save_config({"api_url": "https://configured"})
-        self.assertEqual(
-            raven_cli.resolve_api_url(raven_cli.DEFAULT_API_URL), "https://configured"
-        )
+        self.assertEqual(raven_cli.resolve_api_url(None), "https://configured")
 
     def test_url_keeps_user_override(self):
         raven_cli.save_config({"api_url": "https://configured"})
@@ -114,6 +112,14 @@ class AuthResolutionTests(unittest.TestCase):
             raven_cli.resolve_api_url("http://user-supplied:9000"),
             "http://user-supplied:9000",
         )
+
+    def test_url_env_var_beats_config(self):
+        os.environ["RAVN_API_URL"] = "https://env-supplied"
+        raven_cli.save_config({"api_url": "https://configured"})
+        self.assertEqual(raven_cli.resolve_api_url(None), "https://env-supplied")
+
+    def test_url_falls_back_to_default_when_nothing_configured(self):
+        self.assertEqual(raven_cli.resolve_api_url(None), raven_cli.DEFAULT_API_URL)
 
 
 class ParserSelfTest(unittest.TestCase):

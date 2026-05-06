@@ -1,10 +1,10 @@
-# Raven Skill for AI Agents
+# Ravn Skill for AI Agents
 
-A self-contained skill that lets an AI assistant (Claude Code, Codex, or any agent that supports skills) drive your [Raven](https://github.com/freakspace/raven) trading platform via its REST API. Generate strategies, deploy bots, run backtests, and monitor trading — all from chat.
+A self-contained skill that lets an AI assistant (Claude Code, Codex, or any agent that supports skills) drive your [Ravn](https://github.com/freakspace/raven) trading platform via its REST API. Generate strategies, deploy bots, run backtests, and monitor trading — all from chat.
 
 ## What you get
 
-A natural-language interface to your Raven account:
+A natural-language interface to your Ravn account:
 
 - **"Build me a strategy that buys when EMA crosses up on this market and sells at 5% profit."** → AI drafts the strategy JSON, validates it against the live server schema, and saves it to your account.
 - **"Deploy that simulated."** → bot starts in seconds.
@@ -15,73 +15,116 @@ A natural-language interface to your Raven account:
 ## Requirements
 
 - **Python 3.10 or newer** (no third-party packages — stdlib only).
-- A Raven instance you can reach (self-hosted or hosted).
-- A Raven account with **API keys enabled** on your tier.
+- A Ravn instance you can reach (self-hosted or hosted).
+- A Ravn account with **API keys enabled** on your tier.
 
 ## Install
 
-### Claude Code
+### One-liner (recommended)
 
 ```bash
-mkdir -p ~/.claude/skills
-cp -r raven ~/.claude/skills/
+curl -fsSL https://raw.githubusercontent.com/freakspace/ravn-cli/main/install.sh | bash
 ```
 
-Restart Claude Code (or open a new conversation) — `raven` will appear in available skills.
+That installs the skill to `~/.claude/skills/ravn` and prints the next-step commands. Re-run anytime to update — the installer pulls in place.
 
-### Codex / OpenAI agents
+For Codex instead of Claude Code:
 
 ```bash
-mkdir -p ~/.agents/skills
-cp -r raven ~/.agents/skills/
+curl -fsSL https://raw.githubusercontent.com/freakspace/ravn-cli/main/install.sh | bash -s -- --codex
 ```
 
-Codex picks up the manifest at `agents/openai.yaml`.
+To a custom path:
 
-### Project-local install
+```bash
+curl -fsSL https://raw.githubusercontent.com/freakspace/ravn-cli/main/install.sh | bash -s -- --dir /path/to/install
+```
 
-If you only want the skill in one project, copy it into `<project>/.claude/skills/raven` (Claude Code) or `<project>/.agents/skills/raven` (Codex) instead.
+After install, restart Claude Code (or start a new conversation) — `ravn` will appear in available skills.
+
+### Manual install
+
+If you'd rather not pipe to bash:
+
+```bash
+# Claude Code:
+git clone https://github.com/freakspace/ravn-cli ~/.claude/skills/ravn
+
+# Codex:
+git clone https://github.com/freakspace/ravn-cli ~/.agents/skills/ravn
+
+# Project-local (for one project):
+git clone https://github.com/freakspace/ravn-cli <project>/.claude/skills/ravn
+```
+
+To update a manual install: `cd ~/.claude/skills/ravn && git pull`.
 
 ## Configure
 
 You have two options.
 
+By default the CLI talks to the hosted Ravn instance at **`https://api.ravn.gg`**. Self-hosting? Override with `--api-url`, `RAVN_API_URL`, or by editing the config file (see below).
+
 ### Option 1 (recommended): browser sign-in
 
 ```bash
-python3 ~/.claude/skills/raven/scripts/raven_cli.py --api-url https://your.raven.url login
+# Hosted Ravn (default):
+python3 ~/.claude/skills/ravn/scripts/raven_cli.py login
+
+# Self-hosted:
+python3 ~/.claude/skills/ravn/scripts/raven_cli.py --api-url https://your.ravn.url login
 ```
 
-The CLI opens your browser to a Raven consent page. Sign in, click **Approve**, and a fresh API key is saved to `~/.config/raven/config.json` (mode 0600). You won't need to set any environment variables.
+The CLI opens your browser to a Ravn consent page. Sign in, click **Approve**, and a fresh API key is saved to `~/.config/ravn/config.json` (mode 0600). The URL you logged into is saved alongside the key, so subsequent commands don't need `--api-url` again.
 
 ### Option 2: bring your own key
 
 Generate an API key in **Settings → API Keys** on the web app, then export:
 
 ```bash
-export RAVEN_API_KEY=rvn_...                  # required
-export RAVEN_API_URL=https://your.raven.url   # optional, defaults to http://localhost:8000
+export RAVN_API_KEY=rvn_...                  # required
+export RAVN_API_URL=https://your.ravn.url   # optional, defaults to https://api.ravn.gg
 ```
 
 ### Verify
 
 ```bash
-python3 ~/.claude/skills/raven/scripts/raven_cli.py whoami
+python3 ~/.claude/skills/ravn/scripts/raven_cli.py whoami
 ```
 
-You should see your email and tier. If you get HTTP 401, re-run `login` (or check `RAVEN_API_KEY`). If you get a connection error, check the API URL.
+You should see your email and tier. If you get HTTP 401, re-run `login` (or check `RAVN_API_KEY`). If you get a connection error, check the API URL.
 
 ### Logout
 
 ```bash
-python3 ~/.claude/skills/raven/scripts/raven_cli.py logout
+python3 ~/.claude/skills/ravn/scripts/raven_cli.py logout
 ```
 
 Removes the local config file. The API key itself remains valid until you revoke it in **Settings → API Keys**.
 
-### Auth lookup order
+### Config file
 
-The CLI tries each in order: `--api-key` flag → `RAVEN_API_KEY` env var → `~/.config/raven/config.json` (set by `login`). Same precedence for the API URL.
+`~/.config/ravn/config.json` is generated by `login` and holds:
+
+```json
+{
+  "api_url": "https://api.ravn.gg",
+  "api_key": "rvn_...",
+  "user": { ... },
+  "issued_at": "2026-05-06T..."
+}
+```
+
+Edit `api_url` directly to point the CLI at a different Ravn instance without re-running `login` — the file is just JSON, no special format.
+
+### Resolution order
+
+The CLI resolves the API URL and key in this order, taking the first non-empty value it finds:
+
+1. `--api-url` / `--api-key` command-line flag
+2. `RAVN_API_URL` / `RAVN_API_KEY` environment variable
+3. `~/.config/ravn/config.json`
+4. Default (`https://api.ravn.gg` for the URL; no default for the key)
 
 ## Usage
 
@@ -89,7 +132,7 @@ Once installed, just ask your agent in plain language. The skill description tri
 
 Example:
 
-> Use the raven skill. Show me my bots and pick the one that's losing the most this week.
+> Use the ravn skill. Show me my bots and pick the one that's losing the most this week.
 
 The agent will translate that into the right CLI calls and summarize the results.
 
@@ -120,7 +163,7 @@ See `references/safety.md` for the full rule set.
 The skill is just a folder of instructions and a single Python script:
 
 ```
-raven/
+ravn/
   SKILL.md                   # entry point — what the agent reads
   agents/openai.yaml         # Codex/OpenAI manifest
   scripts/raven_cli.py       # the API client (~700 lines, stdlib only)
@@ -128,10 +171,11 @@ raven/
     workflows.md             # end-to-end recipes
     safety.md                # trading safety rules
     troubleshooting.md       # error reference
+  install.sh                 # one-liner installer (curl | bash)
   README.md                  # this file
 ```
 
-The agent reads `SKILL.md`, calls `raven_cli.py` via Bash for each action, and reads the references on demand. There's no daemon, no MCP server, no webhook — just stdlib HTTP calls to your Raven instance.
+The agent reads `SKILL.md`, calls `raven_cli.py` via Bash for each action, and reads the references on demand. There's no daemon, no MCP server, no webhook — just stdlib HTTP calls to your Ravn instance.
 
 The CLI also exposes the server's own agent docs (`docs prompt`, `docs signals`) so the agent always works against the schema your server actually accepts, even if the schema evolves.
 

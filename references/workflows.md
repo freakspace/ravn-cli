@@ -1,6 +1,52 @@
 # Workflow recipes
 
-End-to-end recipes the agent can adapt. All commands assume `RAVEN_API_KEY` and (optionally) `RAVEN_API_URL` are set, and that the agent is in the skill folder so `scripts/raven_cli.py` resolves.
+End-to-end recipes the agent can adapt. All commands assume `RAVN_API_KEY` and (optionally) `RAVN_API_URL` are set, and that the agent is in the skill folder so `scripts/raven_cli.py` resolves.
+
+## First-time setup as a service account
+
+Use this on a fresh install when the user wants the agent to act under its own child identity (recommended for any long-lived agent install — see SKILL.md for the rationale and trade-offs).
+
+```bash
+# Ask the user first:
+# "I'd like to create a service account named '<name>' under your Ravn account.
+#  It'll have its own API key, share your tier's quota, and won't be able to
+#  trade live until you approve it in Settings. Sound good?"
+
+# After yes, run (this opens their browser):
+python3 scripts/raven_cli.py login \
+  --as-service-account \
+  --service-account-name "<descriptive-name>"
+
+# Verify the new identity. Should show account_type=service, owner=<their email>.
+python3 scripts/raven_cli.py whoami
+
+# If the user later wants live trading, point them at:
+# "Open Settings → Service Accounts → '<name>' → Approve live."
+```
+
+**If the consent flow can't open a browser** (remote server, CI, headless container), fall back to enrollment tokens:
+
+```bash
+# 1. Tell the user to open Settings → Service Accounts → Create enrollment token,
+#    name it (e.g. '<agent-name>-prod'), and paste the rvn_sat_... value.
+
+# 2. With the token in $RAVN_ENROLL_TOKEN:
+RESPONSE=$(curl -s -X POST "$RAVN_API_URL/api/service-accounts/enroll" \
+  -H "Content-Type: application/json" \
+  -d "{\"enrollment_token\":\"$RAVN_ENROLL_TOKEN\",\"name\":\"<agent-name>\"}")
+
+# 3. Extract the API key (shown once — save it now or lose it).
+echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['api_key']['key'])"
+
+# 4. Save it for subsequent CLI calls. Either:
+#    a) export RAVN_API_KEY=rvn_...
+#    b) or write the config file manually:
+mkdir -p ~/.config/ravn
+cat > ~/.config/ravn/config.json <<EOF
+{"api_url": "$RAVN_API_URL", "api_key": "<paste rvn_...>", "account_mode": "service_account"}
+EOF
+chmod 600 ~/.config/ravn/config.json
+```
 
 ## Build and deploy from scratch
 

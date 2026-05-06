@@ -5,7 +5,7 @@ Common errors when driving the API, and what they actually mean.
 ## HTTP 401 — Unauthorized
 
 - The API key is missing, malformed, expired, or revoked.
-- **Do not retry.** Tell the user to check `RAVEN_API_KEY` is set and not stale.
+- **Do not retry.** Tell the user to check `RAVN_API_KEY` is set and not stale.
 - Verify with `python3 scripts/raven_cli.py whoami` — that's the cheapest probe.
 
 ## HTTP 403 — Forbidden
@@ -13,6 +13,14 @@ Common errors when driving the API, and what they actually mean.
 - The user's tier does not include the feature.
 - Examples: Monte Carlo backtest with `--trials > 1` requires `FEATURE_MONTE_CARLO`. The in-product strategy assistant requires `FEATURE_STRATEGY_ASSISTANT` (you don't need this — your AI does the drafting).
 - **Do not retry.** Tell the user which feature they need.
+
+### Service-account-specific 403s
+
+- **"Service accounts are not enabled for your current plan"** — owner's tier needs `FEATURE_SERVICE_ACCOUNTS`. Hit on `--as-service-account` login, enrollment-token creation, enroll, approve-live, rotate, deactivate.
+- **"API keys are not enabled for your current plan"** — owner's tier needs `FEATURE_API_KEYS`. Hit on personal-key login (`login` without `--as-service-account`) and `/api/keys`. Note: SA mode does *not* require this flag.
+- **"Service accounts cannot access this endpoint"** — the agent is running as a service account and tried to hit a human-only route (`/api/keys`, settings, leaderboards, Discord linking, wallet export, owner-side `/api/service-accounts/*` management). Tell the user to perform the action in the web app under their owner identity.
+- **"Service account live trading has not been approved"** — the SA's `can_trade_live` is still false. Owner must open Settings → Service Accounts → Approve live for this child. The agent cannot self-approve.
+- **"Your account is not eligible for live trading"** (on `approve-live` for a child) — the *owner* doesn't have live trading themselves, so they can't grant it to a child. Owner needs `live_trading` on their tier or a per-user `can_trade_live=true` admin override.
 
 ## HTTP 404 — Not found
 
@@ -51,7 +59,7 @@ Common errors when driving the API, and what they actually mean.
 
 ## Connection refused / URLError
 
-- The API isn't reachable at `RAVEN_API_URL`.
+- The API isn't reachable at `RAVN_API_URL`.
 - For local dev: did the user start the API? `make docker` or `uvicorn api.main:app`.
 - For hosted: confirm the URL with the user.
 

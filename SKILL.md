@@ -1,11 +1,11 @@
 ---
-name: raven
-description: Drive a Raven prediction-market trading platform from chat. Generate, validate, deploy, and monitor trading strategies on a user's Raven instance via its REST API. Use when the user asks to build a strategy, deploy or stop a bot, run a backtest or simulation, inspect bot status/logs/events/sessions, review trades or P&L, or otherwise manage their Raven account. Covers: strategies (CRUD + validate), bots (deploy/start/stop/redeploy/delete/inspect), sessions (list/trades/orders/equity), backtests, simulations, and recordings.
+name: ravn
+description: Drive a Ravn prediction-market trading platform from chat. Generate, validate, deploy, and monitor trading strategies on a user's Ravn instance via its REST API. Use when the user asks to build a strategy, deploy or stop a bot, run a backtest or simulation, inspect bot status/logs/events/sessions, review trades or P&L, or otherwise manage their Ravn account. Covers: strategies (CRUD + validate), bots (deploy/start/stop/redeploy/delete/inspect), sessions (list/trades/orders/equity), backtests, simulations, and recordings.
 ---
 
-# Raven
+# Ravn
 
-Connect to a user's Raven trading platform and manage their strategies and bots through the REST API. The user retains full control — every meaningful action goes through their account, gated by their tier.
+Connect to a user's Ravn trading platform and manage their strategies and bots through the REST API. The user retains full control — every meaningful action goes through their account, gated by their tier.
 
 The skill ships a single Python helper, `scripts/raven_cli.py`, that wraps the API. Stdlib only, no installation needed beyond Python 3.10+.
 
@@ -13,8 +13,8 @@ The skill ships a single Python helper, `scripts/raven_cli.py`, that wraps the A
 
 The user must have:
 
-1. A Raven account with API keys enabled (`FEATURE_API_KEYS` on their tier).
-2. The API base URL — defaults to `http://localhost:8000` for self-hosted dev. For hosted, ask the user.
+1. A Ravn account with API keys enabled (`FEATURE_API_KEYS` on their tier).
+2. The API base URL — defaults to `https://api.ravn.gg` (hosted Ravn). Self-hosted users override via `RAVN_API_URL`, `--api-url`, or by editing `api_url` in `~/.config/ravn/config.json`.
 
 ### Recommended: browser sign-in (zero copy-paste)
 
@@ -24,15 +24,56 @@ Tell the user you're going to sign them in, then run:
 python3 scripts/raven_cli.py --api-url <api_url> login
 ```
 
-The CLI starts a local listener on `127.0.0.1:<random>`, opens the user's browser to a Raven consent page, and waits. The user signs in (existing Magic Link flow), clicks **Approve**, and the consent page POSTs an API key to the local listener. The key is saved to `~/.config/raven/config.json` (mode 0600). End-to-end: ~30 seconds, no manual key paste.
+The CLI starts a local listener on `127.0.0.1:<random>`, opens the user's browser to a Ravn consent page, and waits. The user signs in (existing Magic Link flow), clicks **Approve**, and the consent page POSTs an API key to the local listener. The key is saved to `~/.config/ravn/config.json` (mode 0600). End-to-end: ~30 seconds, no manual key paste.
+
+### Service-account mode: recommended for long-lived agent installs
+
+A "service account" is a child principal the human owns. Instead of acting as the human (with a personal key), the agent acts as a *child* of the human — its own user record, its own API key, independent revocation, independent live-trading approval, separate audit trail.
+
+**Default to suggesting service-account mode on first install.** Personal-key mode is fine for one-off scripts; service-account mode is the right default for any agent the user will rely on repeatedly. Ask the user explicitly before provisioning — it's a durable identity under their account that consumes their tier's resources.
+
+```bash
+# Ask first, then run:
+python3 scripts/raven_cli.py login \
+  --as-service-account \
+  --service-account-name "claude-cli"   # or whatever name fits the use case
+```
+
+The flow is identical to personal sign-in (browser opens, user approves), except:
+- The consent page tells the human a *child* will be created, not a personal key.
+- A new `account_type=service` user is provisioned under their account.
+- The CLI saves the *child's* API key to `~/.config/ravn/config.json` and stores `account_mode: "service_account"` so subsequent commands know which principal they're acting as.
+
+**Things the agent must tell the user up front:**
+
+1. **It's a separate identity.** Bots/strategies the agent creates belong to the child, not to them. They show up in **Settings → Service Accounts** in the web app, with options to revoke or deactivate.
+2. **Quotas are pooled.** `max_bots`, `max_strategy_versions`, `max_stored_sessions`, `session_retention_days`, etc. are shared between the human and all their children. If the human is on a tier with `max_bots=3`, that's 3 bots *across* themselves and the new child, not 3 each.
+3. **Live trading needs a second approval.** The child starts with `can_trade_live=false`. Even after the human approves the bot's `--allow-live` flag, the child's live-trading flag must be flipped separately by the owner in **Settings → Service Accounts → Approve live**. Until then, any live deploy by the child returns 403. Surface this if the user asks the agent to deploy live.
+4. **Tier requirement.** The owner's tier must include the `service_accounts` feature flag. If they don't have it, the CLI fails with a 403; tell them to enable it (admin) or fall back to personal-key mode.
+
+**Remote / headless agents (no local browser):** the consent flow needs the user's browser on the same machine the CLI is running on. If you're running on a remote server / SSH session / CI / Codex Cloud where there's no browser to open, this flow won't work. The user instead creates an **enrollment token** in Settings → Service Accounts and pastes it to the agent, which calls:
+
+```bash
+curl -X POST "$RAVN_API_URL/api/service-accounts/enroll" \
+  -H "Content-Type: application/json" \
+  -d '{"enrollment_token":"rvn_sat_...","name":"<agent-name>"}'
+```
+
+The response includes the child account summary and the API key (shown once). Save the key to `~/.config/ravn/config.json` manually or pass it as `RAVN_API_KEY`.
+
+### Asking the user to manage their service accounts
+
+The agent **cannot** approve live trading on itself, rotate its own key, or deactivate itself — those are owner-only routes (`get_current_human_jwt_user`). When the user needs to do any of these, point them at the web app:
+
+> "Go to **Settings → Service Accounts** in the web app. You'll see the `<name>` agent there with options to approve live trading, rotate the API key, or deactivate the account."
 
 ### Alternative: bring-your-own key
 
 If the user already has a key (created in Settings → API Keys), they can export it:
 
 ```bash
-export RAVEN_API_KEY=rvn_...
-export RAVEN_API_URL=https://app.example.com   # optional; defaults to localhost
+export RAVN_API_KEY=rvn_...
+export RAVN_API_URL=https://app.example.com   # optional; defaults to https://api.ravn.gg
 ```
 
 ### Verify
@@ -53,7 +94,7 @@ Removes the local config file. Tell the user that the key is still valid until t
 
 ### Auth lookup order
 
-`--api-key` flag → `RAVEN_API_KEY` env → `~/.config/raven/config.json` (set by `login`). Same for `--api-url` / `RAVEN_API_URL`.
+`--api-key` flag → `RAVN_API_KEY` env → `~/.config/ravn/config.json` (set by `login`). Same for `--api-url` / `RAVN_API_URL`.
 
 ## How to drive a conversation
 
@@ -130,6 +171,7 @@ After kicking off, poll `sessions get <id>` until `status=COMPLETED`.
 5. **Don't retry on 401.** Auth is broken; tell the user to check their key.
 6. **Quote, don't dump.** When summarizing logs/events, pull the key lines. The full output goes to the bundle/file; the conversation gets the summary.
 7. **Use `--json` for chained logic.** When piping output to `jq` or another command, pass `--json`. For human conversation, default summary mode is better.
+8. **Ask before provisioning a service account.** `--as-service-account` creates a persistent child identity that pools the user's quota and shows up in their Settings → Service Accounts. Always describe what you're about to create (name, what it'll be used for) and get explicit yes/no before running the command. Don't reuse a "yes" from earlier in the conversation — fresh approval per provision.
 
 See [references/safety.md](references/safety.md) for trading-safety rules in detail and [references/troubleshooting.md](references/troubleshooting.md) for common error patterns.
 
