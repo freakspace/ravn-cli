@@ -128,7 +128,7 @@ class RavnClient:
                 path = f"{path}?{urlencode(filtered)}"
 
         body = None
-        headers = {"Accept": accept}
+        headers = {"Accept": accept, "User-Agent": "ravn-cli/0.1"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if payload is not None:
@@ -300,14 +300,20 @@ def cmd_strategies_get(client: RavnClient, args: argparse.Namespace) -> int:
 
 def cmd_strategies_create(client: RavnClient, args: argparse.Namespace) -> int:
     payload = load_json_arg(args.json_file)
+    # Auto-wrap a bare strategy graph (matches `strategies validate` tolerance).
+    if "definition" not in payload:
+        bare = payload
+        payload = {"definition": bare}
+        if "name" in bare:
+            payload["name"] = bare["name"]
+        if "description" in bare:
+            payload["description"] = bare["description"]
     if args.name:
         payload["name"] = args.name
     if args.description is not None:
         payload["description"] = args.description
     if "name" not in payload:
         raise SystemExit("Strategy JSON must include 'name' (or pass --name).")
-    if "definition" not in payload:
-        raise SystemExit("Strategy JSON must include 'definition'.")
     data = client.post("/api/strategies", payload)
     s = data or {}
     summary = (
@@ -320,8 +326,14 @@ def cmd_strategies_create(client: RavnClient, args: argparse.Namespace) -> int:
 
 def cmd_strategies_update(client: RavnClient, args: argparse.Namespace) -> int:
     payload = load_json_arg(args.json_file)
+    # Auto-wrap a bare strategy graph (matches `strategies validate` tolerance).
     if "definition" not in payload:
-        raise SystemExit("Update JSON must include 'definition'.")
+        bare = payload
+        payload = {"definition": bare}
+        if "name" in bare:
+            payload["name"] = bare["name"]
+        if "description" in bare:
+            payload["description"] = bare["description"]
     data = client.put(f"/api/strategies/{args.id}", payload)
     s = data or {}
     summary = (
