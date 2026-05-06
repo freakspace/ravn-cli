@@ -804,6 +804,10 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     if not args.api_url:
         raise SystemExit("API URL not configured.")
 
+    as_service_account = bool(getattr(args, "as_service_account", False))
+    sa_name = getattr(args, "service_account_name", None)
+    account_mode = "service_account" if as_service_account else "personal_key"
+
     server = http.server.HTTPServer(("127.0.0.1", 0), _LoginCallbackHandler)
     port = server.server_address[1]
     callback_url = f"http://127.0.0.1:{port}/callback"
@@ -812,12 +816,19 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     _LoginCallbackHandler.payload = None
     _LoginCallbackHandler.delivered_event = delivered
 
+    init_payload: dict[str, Any] = {
+        "callback_url": callback_url,
+        "account_mode": account_mode,
+    }
+    if account_mode == "service_account" and sa_name:
+        init_payload["service_account_name"] = sa_name
+
     init_client = RavenClient(args.api_url, api_key=None)
     try:
         init_response = init_client.request(
             "POST",
             "/api/cli-auth/init",
-            payload={"callback_url": callback_url},
+            payload=init_payload,
             require_auth=False,
         )
     except ApiError as exc:
@@ -829,6 +840,11 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
         server.server_close()
         raise SystemExit(f"Unexpected /init response: {init_response!r}")
 
+    if account_mode == "service_account":
+        print(
+            "Provisioning a new child service account on approve "
+            f"(name={sa_name or 'raven-cli'})."
+        )
     print(f"Opening browser to: {consent_url}")
     print("(If your browser doesn't open, paste the URL above into one manually.)")
     print(f"Listening on {callback_url} for the API key…")
@@ -854,6 +870,8 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
     payload = _LoginCallbackHandler.payload or {}
     api_key = payload.get("api_key")
     user = payload.get("user") or {}
+    delivered_mode = payload.get("account_mode") or account_mode
+    service_account = payload.get("service_account") or None
     if not isinstance(api_key, str) or not api_key.startswith("rvn_"):
         raise SystemExit(f"Did not receive a valid API key: {payload!r}")
 
@@ -863,14 +881,28 @@ def cmd_login(client: RavenClient, args: argparse.Namespace) -> int:
             "api_url": args.api_url,
             "api_key": api_key,
             "user": user,
+            "account_mode": delivered_mode,
+            "service_account": service_account,
             "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     )
     saved_to = save_config(cfg)
-    print(
-        f"Logged in as {user.get('email') or user.get('id') or '?'}. "
-        f"API key saved to {saved_to}"
-    )
+    if delivered_mode == "service_account":
+        sa_label = (
+            (service_account or {}).get("name")
+            or (service_account or {}).get("email")
+            or "service account"
+        )
+        owner_label = user.get("email") or user.get("id") or "?"
+        print(
+            f"Provisioned child service account '{sa_label}' under {owner_label}. "
+            f"API key saved to {saved_to}"
+        )
+    else:
+        print(
+            f"Logged in as {user.get('email') or user.get('id') or '?'}. "
+            f"API key saved to {saved_to}"
+        )
     return 0
 
 
@@ -964,10 +996,29 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="group", required=True)
 
     sub.add_parser("whoami", help="Show authenticated user.").set_defaults(func=cmd_whoami)
-    sub.add_parser(
+    login_p = sub.add_parser(
         "login",
         help="Browser-based sign-in. Stores API key in ~/.config/raven/config.json.",
-    ).set_defaults(func=cmd_login)
+    )
+    login_p.add_argument(
+        "--as-service-account",
+        action="store_true",
+        help=(
+            "Provision a new child service account owned by the approving "
+            "human and use it for this CLI session, instead of issuing a key "
+            "on the human's own account. Requires the owning account's plan "
+            "to have API keys enabled."
+        ),
+    )
+    login_p.add_argument(
+        "--service-account-name",
+        default=None,
+        help=(
+            "Display name for the new child service account. Only used when "
+            "--as-service-account is passed. Defaults to 'raven-cli'."
+        ),
+    )
+    login_p.set_defaults(func=cmd_login)
     sub.add_parser(
         "logout",
         help="Remove the locally stored API key.",
