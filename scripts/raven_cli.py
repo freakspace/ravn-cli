@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import http.server
 import json
 import os
 import secrets
 import sys
-import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -29,7 +27,10 @@ from urllib.request import Request, urlopen
 
 DEFAULT_API_URL = "https://api.ravn.gg"
 DEFAULT_TIMEOUT = 30.0
-LOGIN_LISTENER_TIMEOUT_SECONDS = 300
+# How long to wait for the user to approve in the browser before giving up.
+# Matches the server-side pairing TTL.
+LOGIN_TIMEOUT_SECONDS = 300
+LOGIN_POLL_INTERVAL_SECONDS = 1.5
 
 # Crockford-ish alphabet kept in sync with api/routers/cli_auth.py to derive a
 # short OOB confirmation code from the PKCE challenge. Both sides compute the
@@ -116,6 +117,7 @@ class RavnClient:
         params: dict[str, Any] | None = None,
         require_auth: bool = True,
         accept: str = "application/json",
+        headers_extra: dict[str, str] | None = None,
     ) -> Any:
         if require_auth and not self.api_key:
             raise ApiError(
@@ -134,6 +136,8 @@ class RavnClient:
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        if headers_extra:
+            headers.update(headers_extra)
 
         req = Request(
             f"{self.api_url}{path}", data=body, headers=headers, method=method
@@ -786,55 +790,59 @@ def cmd_recordings_delete(client: RavnClient, args: argparse.Namespace) -> int:
     return 0
 
 
-class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
-    """One-shot HTTP handler that captures the API key delivery from the consent page."""
+def _poll_for_credential(
+    init_client: "RavnClient",
+    pairing_id: str,
+    code_verifier: str,
+    deadline: float,
+) -> dict[str, Any]:
+    """Poll /cli-auth/poll until the credential is delivered or we time out.
 
-    expected_path = "/callback"
-    payload: dict[str, Any] | None = None
-    delivered_event: threading.Event | None = None
-
-    def log_message(self, format: str, *args: Any) -> None:  # silence stderr access logs
-        pass
-
-    def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        # Required when an HTTPS public origin (e.g. dev.ravn.gg) POSTs to a
-        # private IP like 127.0.0.1. Without this, Chrome (and Safari in
-        # stricter modes) block the request with "Load failed".
-        self.send_header("Access-Control-Allow-Private-Network", "true")
-
-    def do_OPTIONS(self) -> None:  # CORS preflight
-        self.send_response(204)
-        self._send_cors_headers()
-        self.end_headers()
-
-    def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] != self.expected_path:
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+    The verifier authenticates the polling CLI to the server: only the
+    process that holds the original PKCE secret can redeem the staged key.
+    Anyone who scrapes the pairing_id from logs/URLs cannot.
+    """
+    headers = {"X-Cli-Code-Verifier": code_verifier}
+    while time.monotonic() < deadline:
         try:
-            data = json.loads(raw.decode("utf-8")) if raw else {}
-        except json.JSONDecodeError:
-            data = None
-        type(self).payload = data if isinstance(data, dict) else None
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(
-            b"<!doctype html><meta charset='utf-8'>"
-            b"<title>Ravn CLI</title>"
-            b"<body style='font-family:system-ui;padding:2em;text-align:center'>"
-            b"<h1>You're signed in</h1>"
-            b"<p>Return to your terminal. You can close this tab.</p></body>"
-        )
-        if type(self).delivered_event is not None:
-            type(self).delivered_event.set()
+            response = init_client.request(
+                "GET",
+                f"/api/cli-auth/poll/{pairing_id}",
+                require_auth=False,
+                headers_extra=headers,
+            )
+        except ApiError as exc:
+            msg = str(exc)
+            if "HTTP 410" in msg:
+                raise SystemExit(
+                    "Pairing expired or already consumed. Re-run `login`."
+                ) from exc
+            if "HTTP 403" in msg:
+                # Wrong verifier — server isn't disclosing whether pairing
+                # exists, so don't either. Most likely client/server skew.
+                raise SystemExit(
+                    "Pairing rejected by server. Re-run `login`."
+                ) from exc
+            # Transient errors (5xx, network) — keep polling, don't bail.
+            time.sleep(LOGIN_POLL_INTERVAL_SECONDS)
+            continue
+
+        if not isinstance(response, dict):
+            time.sleep(LOGIN_POLL_INTERVAL_SECONDS)
+            continue
+
+        status = response.get("status")
+        if status == "completed":
+            return response
+        if status != "pending":
+            # Unknown status from a future server — bail rather than spin.
+            raise SystemExit(f"Unexpected poll status: {status!r}")
+        time.sleep(LOGIN_POLL_INTERVAL_SECONDS)
+
+    raise SystemExit(
+        f"Login timed out after {LOGIN_TIMEOUT_SECONDS}s. "
+        "Re-run `login` and approve in the browser before the timeout."
+    )
 
 
 def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
@@ -846,23 +854,15 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
     account_mode = "service_account" if as_service_account else "personal_key"
 
     # PKCE: the verifier is held by this CLI process only. The server
-    # receives only the SHA-256 hash. The same hash is later echoed by the
-    # browser to the loopback listener, which lets us reject any payload
-    # that didn't come from the legitimate flow we started.
+    # receives only the SHA-256 hash on /init. To redeem the staged key we
+    # echo the verifier on /poll, where the server matches it against the
+    # stored hash. The verifier never leaves the local process except over
+    # TLS to the same server it was bound to.
     code_verifier = secrets.token_urlsafe(32)
     code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
     expected_user_code = _derive_user_code(code_challenge)
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _LoginCallbackHandler)
-    port = server.server_address[1]
-    callback_url = f"http://127.0.0.1:{port}/callback"
-    delivered = threading.Event()
-
-    _LoginCallbackHandler.payload = None
-    _LoginCallbackHandler.delivered_event = delivered
-
     init_payload: dict[str, Any] = {
-        "callback_url": callback_url,
         "account_mode": account_mode,
         "code_challenge": code_challenge,
     }
@@ -878,19 +878,17 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
             require_auth=False,
         )
     except ApiError as exc:
-        server.server_close()
         raise SystemExit(f"Could not start login flow: {exc}") from exc
 
     consent_url = (init_response or {}).get("consent_url")
+    pairing_id = (init_response or {}).get("pairing_id")
     server_user_code = (init_response or {}).get("user_code")
-    if not consent_url:
-        server.server_close()
+    if not consent_url or not pairing_id:
         raise SystemExit(f"Unexpected /init response: {init_response!r}")
     if server_user_code and server_user_code != expected_user_code:
         # If the server returns a different code than we computed locally,
         # we cannot trust the OOB confirmation — abort rather than mislead
         # the user.
-        server.server_close()
         raise SystemExit(
             "Server returned a user_code that does not match the local PKCE "
             "challenge. Refusing to continue."
@@ -912,47 +910,27 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
     print()
     print(f"Opening browser to: {consent_url}")
     print("(If your browser doesn't open, paste the URL above into one manually.)")
-    print(f"Listening on {callback_url} for the API key…")
-    del code_verifier  # only the challenge is needed beyond this point
-
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    print(
+        f"Waiting for approval (poll every {LOGIN_POLL_INTERVAL_SECONDS:.1f}s, "
+        f"timeout {LOGIN_TIMEOUT_SECONDS}s)…"
+    )
 
     try:
         webbrowser.open(consent_url, new=1, autoraise=True)
     except Exception:
         pass
 
-    completed = delivered.wait(timeout=LOGIN_LISTENER_TIMEOUT_SECONDS)
-    server.shutdown()
-    server.server_close()
+    deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
+    payload = _poll_for_credential(
+        init_client, pairing_id, code_verifier, deadline
+    )
 
-    if not completed:
-        raise SystemExit(
-            f"Login timed out after {LOGIN_LISTENER_TIMEOUT_SECONDS}s. "
-            "Re-run `login` and approve in the browser."
-        )
-
-    payload = _LoginCallbackHandler.payload or {}
     api_key = payload.get("api_key")
     user = payload.get("user") or {}
     delivered_mode = payload.get("account_mode") or account_mode
     service_account = payload.get("service_account") or None
-    delivered_challenge = payload.get("code_challenge")
     if not isinstance(api_key, str) or not api_key.startswith("rvn_"):
-        raise SystemExit(f"Did not receive a valid API key: {payload!r}")
-    if not isinstance(delivered_challenge, str) or not secrets.compare_digest(
-        delivered_challenge, code_challenge
-    ):
-        # A racing local process could POST `{api_key: "rvn_attacker"}` to the
-        # listener before the legitimate consent page does. Without the PKCE
-        # echo the CLI cannot tell them apart; with it, any payload that
-        # doesn't carry our local challenge is rejected.
-        raise SystemExit(
-            "Refusing payload: missing or mismatched PKCE challenge. The "
-            "credential delivered to the local listener was not from the "
-            "consent flow this CLI started."
-        )
+        raise SystemExit(f"Poll succeeded but no valid API key returned: {payload!r}")
 
     cfg = load_config()
     cfg.update(
