@@ -159,6 +159,14 @@ class RavnClient:
             ) from exc
         except URLError as exc:
             raise ApiError(f"{method} {path} failed: {exc.reason}") from exc
+        except TimeoutError as exc:
+            # Read-timeout from urlopen surfaces as a bare TimeoutError (not
+            # wrapped in URLError). Wrap so callers — especially the login
+            # poll loop — can treat it as a transient ApiError instead of
+            # crashing the process.
+            raise ApiError(
+                f"{method} {path} timed out after {DEFAULT_TIMEOUT}s"
+            ) from exc
 
     def get(self, path: str, **kwargs: Any) -> Any:
         return self.request("GET", path, **kwargs)
@@ -862,6 +870,25 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
     code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
     expected_user_code = _derive_user_code(code_challenge)
 
+    # Print the confirmation code before /init so the user sees it
+    # immediately — even if the API is slow to respond, the code is ready
+    # for them to compare against the consent page the moment the browser
+    # opens.
+    if account_mode == "service_account":
+        print(
+            "Provisioning a new child service account on approve "
+            f"(name={sa_name or 'raven-cli'})."
+        )
+    print()
+    print(f"  Confirmation code: {expected_user_code}")
+    print()
+    print(
+        "  Verify this code matches what your browser shows on the consent "
+        "page. If it does not match, click Cancel — someone may be trying "
+        "to trick you into approving their CLI session."
+    )
+    print()
+
     init_payload: dict[str, Any] = {
         "account_mode": account_mode,
         "api_url": args.api_url,
@@ -895,20 +922,6 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
             "challenge. Refusing to continue."
         )
 
-    if account_mode == "service_account":
-        print(
-            "Provisioning a new child service account on approve "
-            f"(name={sa_name or 'raven-cli'})."
-        )
-    print()
-    print(f"  Confirmation code: {expected_user_code}")
-    print()
-    print(
-        "  Verify this code matches what your browser shows on the consent "
-        "page. If it does not match, click Cancel — someone may be trying "
-        "to trick you into approving their CLI session."
-    )
-    print()
     print(f"Opening browser to: {consent_url}")
     print("(If your browser doesn't open, paste the URL above into one manually.)")
     print(
