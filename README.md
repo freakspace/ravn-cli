@@ -73,9 +73,12 @@ python3 ~/.claude/skills/ravn/scripts/raven_cli.py login
 
 # Self-hosted:
 python3 ~/.claude/skills/ravn/scripts/raven_cli.py --api-url https://your.ravn.url login
+
+# Staging:
+python3 ~/.claude/skills/ravn/scripts/raven_cli.py --api-url https://dev-api.ravn.gg login
 ```
 
-The CLI opens your browser to a Ravn consent page. Sign in, click **Approve**, and a fresh API key is saved to `~/.config/ravn/config.json` (mode 0600). The URL you logged into is saved alongside the key, so subsequent commands don't need `--api-url` again.
+The CLI opens your browser to a Ravn consent page. Sign in, verify the confirmation code, click **Approve**, and a fresh API key is saved to `~/.config/ravn/config.json` (mode 0600). The API URL you logged into is saved alongside the key, so subsequent commands don't need `--api-url` again.
 
 ### Option 2: bring your own key
 

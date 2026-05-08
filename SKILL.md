@@ -24,7 +24,13 @@ Tell the user you're going to sign them in, then run:
 python3 scripts/raven_cli.py --api-url <api_url> login
 ```
 
-The CLI starts a local listener on `127.0.0.1:<random>`, opens the user's browser to a Ravn consent page, and waits. The user signs in (existing Magic Link flow), clicks **Approve**, and the consent page POSTs an API key to the local listener. The key is saved to `~/.config/ravn/config.json` (mode 0600). End-to-end: ~30 seconds, no manual key paste.
+The CLI opens the user's browser to a Ravn consent page and polls the API until the user approves. The user signs in (existing Magic Link flow), verifies the confirmation code, clicks **Approve**, and the API key is delivered back to the waiting CLI over the same API environment. The key is saved to `~/.config/ravn/config.json` (mode 0600). End-to-end: ~30 seconds, no manual key paste.
+
+For staging, use the staging API URL explicitly:
+
+```bash
+python3 scripts/raven_cli.py --api-url https://dev-api.ravn.gg login
+```
 
 ### Service-account mode: recommended for long-lived agent installs
 

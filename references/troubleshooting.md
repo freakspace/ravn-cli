@@ -63,6 +63,13 @@ Common errors when driving the API, and what they actually mean.
 - For local dev: did the user start the API? `make docker` or `uvicorn api.main:app`.
 - For hosted: confirm the URL with the user.
 
+## Browser sign-in shows "Load error"
+
+- For CLI login on staging, make sure the CLI was started with the staging API, not the frontend URL or production API:
+  `python3 scripts/raven_cli.py --api-url https://dev-api.ravn.gg login`
+- If the browser reaches the consent page but cannot load the pairing, re-run login with a freshly installed CLI. Newer clients put the API origin in the consent URL so the staging page approves the same environment that created the pairing.
+- If Magic itself shows the load error before the Raven consent page appears, the staging domain may be missing from the Magic app's allowed domains. That is a deployment/config issue, not an API-key retry problem.
+
 ## "Trading blocked" in bootstrap
 
 - `trading_blocked=true` means the bot's RiskManager is preventing new orders.

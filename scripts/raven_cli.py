@@ -864,6 +864,7 @@ def cmd_login(client: RavnClient, args: argparse.Namespace) -> int:
 
     init_payload: dict[str, Any] = {
         "account_mode": account_mode,
+        "api_url": args.api_url,
         "code_challenge": code_challenge,
     }
     if account_mode == "service_account" and sa_name:
