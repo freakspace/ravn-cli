@@ -565,6 +565,57 @@ def cmd_bots_bootstrap(client: RavnClient, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bots_ticks(client: RavnClient, args: argparse.Namespace) -> int:
+    data = client.get(
+        f"/api/bots/{args.id}/monitor/market-ticks",
+        params={
+            "market_id": args.market,
+            "hours": args.hours,
+            "limit": args.limit,
+        },
+    )
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True, default=str))
+        return 0
+    events = (data or {}).get("events") or []
+    print(
+        f"{len(events)} market ticks (market={args.market}, "
+        f"hours={args.hours}, limit={args.limit})"
+    )
+    for e in events[-args.show :]:
+        print(
+            f"  {e.get('ts')}  outcome={e.get('outcome_index')}  "
+            f"price={e.get('price')}"
+        )
+    return 0
+
+
+def cmd_bots_candles(client: RavnClient, args: argparse.Namespace) -> int:
+    data = client.get(
+        f"/api/bots/{args.id}/monitor/candles",
+        params={
+            "market_id": args.market,
+            "outcome_index": args.outcome,
+            "period": args.period,
+            "hours": args.hours,
+        },
+    )
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True, default=str))
+        return 0
+    candles = (data or {}).get("candles") or []
+    print(
+        f"{len(candles)} candles (market={args.market}, "
+        f"outcome={args.outcome}, period={args.period}, hours={args.hours})"
+    )
+    for c in candles[-args.show :]:
+        print(
+            f"  {c.get('ts')}  o={c.get('open')}  h={c.get('high')}  "
+            f"l={c.get('low')}  c={c.get('close')}  vol={c.get('volume')}"
+        )
+    return 0
+
+
 def cmd_bots_sessions(client: RavnClient, args: argparse.Namespace) -> int:
     data = client.get(f"/api/bots/{args.id}/sessions")
     items = data if isinstance(data, list) else []
@@ -634,13 +685,21 @@ def cmd_sessions_trades(client: RavnClient, args: argparse.Namespace) -> int:
         f"/api/sessions/{args.id}/trades",
         params={"page": args.page, "page_size": args.page_size},
     )
-    if args.json:
-        print(json.dumps(data, indent=2, sort_keys=True, default=str))
-        return 0
     items = (data or {}).get("trades") or (data or [])
     if not isinstance(items, list):
         items = []
-    print(f"{len(items)} trades (page {args.page})")
+    if args.market:
+        # Server doesn't expose a market filter on trades; do it client-side.
+        # Pages may look sparse if the matching trades are unevenly distributed
+        # — bump --page-size if you don't see what you expect.
+        items = [t for t in items if t.get("market_id") == args.market]
+    if args.json:
+        if args.market and isinstance(data, dict):
+            data = {**data, "trades": items}
+        print(json.dumps(data, indent=2, sort_keys=True, default=str))
+        return 0
+    suffix = f", market={args.market}" if args.market else ""
+    print(f"{len(items)} trades (page {args.page}{suffix})")
     for t in items:
         print(
             f"  {t.get('timestamp')}  {t.get('side'):<5}  "
@@ -795,6 +854,62 @@ def cmd_recordings_delete(client: RavnClient, args: argparse.Namespace) -> int:
         raise SystemExit("Refusing to delete recording without --confirm.")
     data = client.delete(f"/api/simulations/recordings/{args.id}")
     emit(args, f"deleted recording {args.id}: {data}", data)
+    return 0
+
+
+def cmd_markets_search(client: RavnClient, args: argparse.Namespace) -> int:
+    data = client.get(
+        f"/api/markets/{args.venue}/browse/search",
+        params={
+            "q": args.query,
+            "page": args.page,
+            "page_size": args.page_size,
+            "status": args.status,
+        },
+    )
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True, default=str))
+        return 0
+    items = (data or {}).get("items") or []
+    print(
+        f"{len(items)} matches for {args.query!r} on {args.venue} "
+        f"(page {args.page}, status={args.status})"
+    )
+    for ev in items:
+        markets = ev.get("preview_markets") or []
+        market_ids = [m.get("market_id") for m in markets if m.get("market_id")]
+        print(
+            f"  {ev.get('slug')}  ({len(markets)} markets)  {ev.get('title')}"
+        )
+        if market_ids:
+            print(f"    market_ids: {', '.join(market_ids[:3])}"
+                  + ("…" if len(market_ids) > 3 else ""))
+    return 0
+
+
+def cmd_markets_get(client: RavnClient, args: argparse.Namespace) -> int:
+    data = client.get(
+        f"/api/markets/{args.venue}/events/slug/{args.slug}",
+        params={"include_closed": "true" if args.include_closed else None},
+    )
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True, default=str))
+        return 0
+    event = (data or {}).get("event") or {}
+    markets = event.get("markets") or []
+    print(
+        f"event {event.get('slug')}  active={event.get('active')}  "
+        f"closed={event.get('closed')}\n"
+        f"  title : {event.get('title')}\n"
+        f"  id    : {event.get('id')}\n"
+        f"  {len(markets)} markets:"
+    )
+    for m in markets:
+        print(
+            f"    {m.get('market_id')}  status={m.get('status'):<8}  "
+            f"bid={m.get('best_bid')}  ask={m.get('best_ask')}  "
+            f"{m.get('group_item_title') or m.get('title')}"
+        )
     return 0
 
 
@@ -1018,10 +1133,13 @@ def cmd_self_test(client: RavnClient, args: argparse.Namespace) -> int:
         ["bots", "logs", "X"],
         ["bots", "events", "X"],
         ["bots", "bootstrap", "X"],
+        ["bots", "ticks", "X", "--market", "M"],
+        ["bots", "candles", "X", "--market", "M"],
         ["bots", "sessions", "X"],
         ["sessions", "list"],
         ["sessions", "get", "X"],
         ["sessions", "trades", "X"],
+        ["sessions", "trades", "X", "--market", "M"],
         ["sessions", "orders", "X"],
         ["sessions", "equity", "X"],
         ["sessions", "logs", "X"],
@@ -1031,6 +1149,8 @@ def cmd_self_test(client: RavnClient, args: argparse.Namespace) -> int:
         ["recordings", "start", "--markets", "m1,m2"],
         ["recordings", "stop", "X"],
         ["recordings", "delete", "X", "--confirm"],
+        ["markets", "search", "polymarket", "--query", "btc"],
+        ["markets", "get", "polymarket", "--slug", "some-event"],
     ]
     for argv in samples:
         ns = parser.parse_args(argv)
@@ -1181,6 +1301,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.add_argument("--hours", type=float, default=1.0)
     p.set_defaults(func=cmd_bots_bootstrap)
+    p = bots_sub.add_parser("ticks", help="Raw MARKET_TICK events for one market.")
+    p.add_argument("id")
+    p.add_argument("--market", required=True, help="market_id to filter on.")
+    p.add_argument("--hours", type=float, default=1.0)
+    p.add_argument("--limit", type=int, default=2000)
+    p.add_argument("--show", type=int, default=20, help="How many ticks to print in summary mode.")
+    p.set_defaults(func=cmd_bots_ticks)
+    p = bots_sub.add_parser("candles", help="OHLC candles aggregated from market ticks.")
+    p.add_argument("id")
+    p.add_argument("--market", required=True, help="market_id to chart.")
+    p.add_argument("--outcome", type=int, default=0, help="Outcome index (default 0).")
+    p.add_argument("--period", default="5m", help="Candle period (e.g. 1m, 5m, 1h).")
+    p.add_argument("--hours", type=float, default=24.0)
+    p.add_argument("--show", type=int, default=20, help="How many candles to print in summary mode.")
+    p.set_defaults(func=cmd_bots_candles)
     p = bots_sub.add_parser("sessions")
     p.add_argument("id")
     p.set_defaults(func=cmd_bots_sessions)
@@ -1207,6 +1342,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.add_argument("--page", type=int, default=1)
     p.add_argument("--page-size", type=int, default=50)
+    p.add_argument(
+        "--market",
+        help=(
+            "Optional client-side market_id filter. The server returns the "
+            "full page; matching trades are filtered locally."
+        ),
+    )
     p.set_defaults(func=cmd_sessions_trades)
     p = sess_sub.add_parser("orders")
     p.add_argument("id")
@@ -1244,6 +1386,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int)
     p.add_argument("--max-workers", type=int)
     p.set_defaults(func=cmd_backtest)
+
+    mkt = sub.add_parser(
+        "markets",
+        help="Look up venue markets and events (slug → market_id).",
+    )
+    mkt_sub = mkt.add_subparsers(dest="action", required=True)
+    p = mkt_sub.add_parser("search", help="Search venue events by keyword.")
+    p.add_argument("venue", help="Venue id (e.g. polymarket).")
+    p.add_argument("--query", "-q", required=True, help="Search keyword.")
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--page-size", type=int, default=10)
+    p.add_argument(
+        "--status",
+        choices=("open", "all", "closed"),
+        default="open",
+        help="Event status filter (default: open).",
+    )
+    p.set_defaults(func=cmd_markets_search)
+    p = mkt_sub.add_parser(
+        "get",
+        help="Look up a venue event by slug → returns market_ids.",
+    )
+    p.add_argument("venue", help="Venue id (e.g. polymarket).")
+    p.add_argument("--slug", required=True, help="Event slug.")
+    p.add_argument(
+        "--include-closed",
+        action="store_true",
+        help="Include closed child markets in the response.",
+    )
+    p.set_defaults(func=cmd_markets_get)
 
     rec = sub.add_parser("recordings", help="Market data recordings (sources for backtests).")
     rec_sub = rec.add_subparsers(dest="action", required=True)
